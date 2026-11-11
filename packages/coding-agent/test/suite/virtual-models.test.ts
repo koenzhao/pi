@@ -394,4 +394,71 @@ describe("AgentSession virtual models", () => {
 		// The router's model and thinking level apply. The provider layer sizes output from that model.
 		expect(summaries).toEqual(["large:low", "large:low"]);
 	});
+	it("does not compact on threshold when the virtual selection reports no context window", async () => {
+		// A virtual model is a catalog entry without limits of its own: omitting contextWindow
+		// leaves it at 0, which made every threshold comparison true (fixes #12035).
+		const compactStarts: string[] = [];
+		const harness = await createHarness({
+			models: [{ id: "faux-1", contextWindow: 50_000 }],
+			tools: [],
+			settings: { compaction: { enabled: true, reserveTokens: 10, keepRecentTokens: 100 } },
+			extensionFactories: [
+				(pi) => {
+					pi.registerVirtualModel({
+						provider: "router",
+						id: "auto",
+						name: "Auto",
+						route: (_request, ctx) => ({
+							model: ctx.modelRegistry.find("faux", "faux-1")!,
+							thinkingLevel: "off",
+						}),
+					});
+					pi.on("session_before_compact", (event) => {
+						compactStarts.push(event.reason);
+						return { cancel: true };
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		await harness.session.setModel(harness.session.modelRuntime.getModel("router", "auto")!);
+		expect(harness.session.model?.contextWindow).toBe(0);
+
+		// Enough history that a real cut point exists, ended by the aborted zero-usage
+		// response the pre-prompt check looks at.
+		const selected = harness.session.model!;
+		for (const label of ["old", "recent"]) {
+			harness.sessionManager.appendMessage({
+				role: "user",
+				content: [{ type: "text", text: label.padEnd(200, "x") }],
+				timestamp: Date.now() - 4000,
+			});
+			const answer = fauxAssistantMessage(label.padEnd(200, "y"), { timestamp: Date.now() - 3000 });
+			harness.sessionManager.appendMessage({
+				...answer,
+				api: selected.api,
+				provider: selected.provider,
+				model: selected.id,
+				usage: { ...answer.usage, input: 300, totalTokens: 300 },
+			});
+		}
+		const aborted = fauxAssistantMessage("stopped", { stopReason: "aborted", timestamp: Date.now() - 1000 });
+		harness.sessionManager.appendMessage({
+			...aborted,
+			api: selected.api,
+			provider: selected.provider,
+			model: selected.id,
+		});
+		harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
+
+		const lastAssistant = (
+			harness.session as unknown as { _findLastAssistantMessage(): unknown }
+		)._findLastAssistantMessage();
+		const compacted = await (
+			harness.session as unknown as { _checkCompaction(m: unknown, skip: boolean): Promise<boolean> }
+		)._checkCompaction(lastAssistant, false);
+
+		expect(compactStarts).toEqual([]);
+		expect(compacted).toBe(false);
+	});
 });

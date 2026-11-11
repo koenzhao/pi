@@ -3117,7 +3117,9 @@ export class AgentSession {
 		// physical model that produced the message supplies the limits.
 		const messageModel = this._modelForMessage(assistantMessage);
 		const sameModel = messageModel !== undefined;
-		const contextWindow = (messageModel ?? this.model)?.contextWindow ?? 0;
+		// Fall back to the routed physical model's limits, not the selection's: a virtual
+		// model is a catalog entry without limits of its own and reports contextWindow 0.
+		const contextWindow = (messageModel ?? this._limitsModel())?.contextWindow ?? 0;
 
 		// Skip compaction checks if this assistant message is older than the latest
 		// compaction boundary. This prevents a stale pre-compaction usage/error
@@ -3233,6 +3235,9 @@ export class AgentSession {
 		} else {
 			contextTokens = directContextTokens;
 		}
+		// Unknown limits cannot be compared to anything: shouldCompact() would be true for
+		// any estimate because contextWindow is 0. Mirror _exceedsCompactionThreshold().
+		if (contextWindow <= 0) return false;
 		if (shouldCompact(contextTokens, contextWindow, settings)) {
 			return await this._runAutoCompaction("threshold", false);
 		}
